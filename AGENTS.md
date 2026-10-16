@@ -1,0 +1,99 @@
+# LeRobot Visualizer Agent Guide
+
+Start the read-only service from the repository root with `python -m app`. Browser: `http://127.0.0.1:8000/view`; MCP Streamable HTTP: `POST http://127.0.0.1:8000/mcp`. Discover tools before calling them. Local data or read-only S3 credentials are configured by the operator; never include credentials in prompts, URLs, replies, logs or saved evaluation material.
+
+## Discovery, semantics and sources
+
+Call `describe_dataset` first. Original `description` and coordinate `frame`, declared dtype/shape, Arrow `storage_dtype`, `timestamp_prefix`, `component_layout`, units and their sources describe different things. `observed_length_scope` is one sampled row of the first episode, not a full structure audit. Use `audit_integrity` for checked counts and length histograms. Missing metadata is unknown, never a guessed unit or layout. Fields paginate with `field_limit` (1..32), `field_cursor` and `next_field_cursor`; episodes paginate independently through `list_episodes`.
+
+For this snapshot, camera position is `[ts_ns,x,y,z]`, world coordinates, XYZ meters; camera quaternion and observed hand tracks also contain a leading timestamp. Action tracks have 63 spatial components without a timestamp prefix. Explicit `field[index]` and query `component` always use RAW indices, including embedded timestamp 0 where present. Whole-vector curves exclude only known timestamp prefixes before their mean. Exact synchronization uses the separate integer `timestamp_ns`, not float32 `timestamp` or a float inside a vector.
+
+MANO fields (`observation.left_hand_mano`, `observation.right_hand_mano`) are camera-coordinate 61-component vectors with NO leading timestamp. Metadata specifies raw half-open slices `[0,3)` global orientation axis-angle, `[3,48)` hand pose axis-angle, `[48,58)` betas, `[58,61)` translation. This is a mixed vector; do not assign one spatial unit, invent joint names or infer angle units without metadata. Unknown units stay unknown.
+
+Episode `success` is a metadata declaration, not measured task truth. For this snapshot its source is `meta/custom_metadata.csv:episode_index=0:success`; the tool reports the actual value/source/status. Missing or ambiguous sources return null with status. Do not attribute a value to a tool unless its actual response contains it. A single episode cannot establish population success rate or generalization. `frame_period_ns` is the median adjacent integer timestamp difference, not a claim all intervals are equal. Data `[data_start_ns,data_end_ns)` and encoded video `[video_start_ns,video_end_ns)` domains are distinct.
+
+## Tools and boundaries
+
+- `describe_dataset`: bounded layout, dictionaries, metadata provenance, time rules and unavailable evidence; an overview URL does not prove a selected numeric range.
+- `list_episodes`: limit 1..100; cursor is an episode offset.
+- `query_series`: ONE scalar/vector/raw component over half-open frame OR timestamp ranges. Never mix them. Default/max rows come from discovery (normally 256); requesting more is an error. Legal pages can shrink due scalar/full-text bytes. `start_frame/end_frame` are THIS PAGE, `requested_frame_range` is original; `requested_limit`, `returned_count`, `truncation_reasons` explain truncation. Reuse the ORIGINAL field, component, range AND limit, changing ONLY cursor to the returned `next_cursor`. Cursor is a relative offset, not an absolute frame. Example: `[1513,1518)`, limit 2 has offsets 0,2,4 and pages `[1513,1515)`, `[1515,1517)`, `[1517,1518)`.
+- `aggregate_series`: count/min/max/mean/p50/p95 for a scalar or explicit vector component. All requested input is computed, subject to the advertised computation cap; output is separately bounded. `input_range/input_count/exact` specify scope. Do not merge local percentiles into a global percentile.
+- `compare_series`: `left/right={field,component}`, a left half-open frame range and `right_frame_offset`. Pair right frame `t+offset`, not distributions. For action left raw0 versus observed left raw1 next-frame verification use offset +1, `[0,3028)`; final action has no next-frame target. Vectors require components. Finite binary64 numeric equality treats +0/-0 as equal; unsafe integer-to-float conversion is rejected. Missing, duplicate and nonfinite pairs do not count as matches. Zero eligible pairs means null errors, not zero error. Report expected/found/finite/matched counts, completion and remaining ranges separately from MAE/RMSE/max. One component does NOT prove all 63 components.
+- `audit_timing`: check timestamps and PTS, intervals within the requested range, duplicates/backwards and coverage. Raw integer PTS and rational time_base convert using nearest integer ns, ties to even (`rational_ns_v1`). Pair by frame index; timestamp encoding agreement does NOT prove capture clock precision, scene alignment, contact time or drift. An unavailable/partial PTS scan is not zero anomalies.
+- `audit_integrity`: up to eight numeric fields; null/nonfinite, length histograms and exact all-zero vectors. Mean zero is not all zero. Max five anomaly examples and sixteen histogram buckets; nonfinite JSON uses type markers. Diagnostics run before strict table validation, locate physical row offsets and separately report bad frame_index. A malformed-source selection URL may be unavailable to the strict renderer; never substitute a default image as evidence.
+- `encode_view`, `decode_view`: validate canonical ViewState v1 and share URL. Copy returned strings verbatim; never assemble base64 yourself.
+- `render_view`: the human browser image, ONE bounded PNG image block and text manifest/hash/URL. Look at the actual image for visual questions; do not claim a human reviewed it. Image receipt alone does not establish its visual content.
+
+Audits default to 8192 rows, 1000000 input scalars, five examples and eight fields, with a shared 32 MiB work budget and service execution/queue admission. Compare/timing check scalar selections; integrity checks vectors. Audits return completed and remaining ranges, `truncated/next_cursor`, replay parameters and a selection URL. Continue with the ORIGINAL args and returned cursor. An error or unchecked range is never an empty/zero-anomaly dataset. All tools have optional `max_output_bytes` (minimum 512), bounding COMPLETE UTF-8 content.text, including URLs and bounded errors. Business failures return `isError` and code/parameter/constraint/recovery; correct input and retry the original target. Protocol failures remain JSON-RPC errors. Never request a complete Parquet or video.
+
+## Budget and evidence workflow
+
+For formal evaluation the main budget is at most **40 business tools/call** and **204800 UTF-8 bytes** across ALL content.text responses, including errors, repeats, discarded responses and client budget messages. Discovery/protocol is separately recorded, excluded from this main budget. Full MCP serialization (possibly duplicating structuredContent), transport bytes, tokens and PNG bytes are separate metrics. Characters are not UTF-8 bytes; Chinese and emoji differ. Saving to disk does not refund a response.
+
+The audited client saves raw received responses BEFORE parsing/computation, and a ledger including calls, UTF-8 totals, remaining allowance and coverage. Set a response budget and reserve final verification allowance before calling; stop BEFORE a call that cannot fit. The proxy reports `client_budget`. Leave 4096 bytes for final verification. If a script fails after receipt, preserve that response and record the failure; do not requery by default. No silent whole-run retries or hidden extra validation calls. If the budget ends, report exactly checked ranges and remaining ranges. A service log alone does not prove what the model received; client truncation/image delivery must be evidenced separately.
+
+For each conclusion: discover semantics -> bounded numeric/audit evidence -> matching encode/render if needed -> fact/inference/hypothesis, source, raw component, exact coverage, tool call and VERBATIM URL, reproducible method and limitations. Extract and validate links from the actual FINAL answer/file, not just intermediate objects. Compare all relevant decoded fields and evidence; a valid default view cannot stand for a query. Copying a previously verified original URL avoids an extra call; unverified links must be labelled pending. Localhost URLs require the same snapshot service; changing ports uses `/api/view/normalize`, retaining original URL and mapping as a separate check.
+
+## ViewState and visual interpretation
+
+```json
+{"schema_version":1,"episode":0,"cursor":{"frame":1514},"time_range":null,"panels":["video","series","metadata"],"series":["base_0_camera/position","action.left_hand_tracks"],"overlays":[{"type":"hand_tracks","sides":["left","right"]}],"render":{"width":1024,"height":768},"display":{"locale":"en","info_bar":true}}
+```
+
+Cursor and time range are exclusive; range timestamps must stay within the sampling domain. URL <=16384 chars, up to eight series, dimensions <=1600x1200. Server normalization governs UI and tools; `resolved_frame` is extra navigation metadata, not URL state. Display locale/info_bar are shared. Opening is paused; playing or editing episode/frame/range/series clears stale evidence, display-only edits preserve it. Share pauses and uses the actually presented immutable frame/state/PNG snapshot, not pending settings.
+
+Query evidence renders its RETURNED page; aggregate evidence renders the full input. Priority: query page -> aggregate input -> time range -> cursor window. Ranges are half-open, evidence never expands; single rows are points. Manifest `range_start_frame/range_end_frame/range_source` is always present even with series disabled. Aggregate requested/returned ranges must match. `range_expanded` describes an ordinary time-range fallback only.
+
+For a single-variable visual test, deep-copy the ENTIRE normalized state and modify one path. At frame3025 use single-frame evidence `[3025,3026)`, `series=[action.left_hand_tracks]`, both overlays, 1024x768; only `display.info_bar` may differ. Check decoded FINAL URLs as well as temporary states. Optional fields/defaults cannot silently change the comparison.
+
+Overlay uses same-frame OBSERVED left/right tracks, regardless of the selected action series. It draws indexed 21-point projections, no anatomy or skeleton. Manifest includes calibration image size, decoded video size, video_rect and scale/translation/crop. Old `projected_points` means points checked; `outside_canvas` means camera z<=0 OR a nonfinite/out-of-calibrated-image projected center, NOT the boundary of the complete PNG. New nonfinite/behind/outside-image/drawn counts are mutually exclusive; total=sum(categories). Drawn points do not establish visibility, occlusion, scene ROI or pixel-level calibration. Dark bands may be scene content, encoded image or padding; disabling info_bar/overlays controls those variables but supplies no ROI truth.
+
+## Claims that require restraint
+
+A verified `A[t]=O[t+1]` target relation does not permit future observations as inputs: use allowed observations <=t to predict A[t]. Without a next-frame target, mask the final regression loss and separate target statistics while retaining the final observation. A zero vector does not prove stillness, episode termination, reward or success. Do not generalize left-hand/component results to other sides/components or trials.
+
+The dataset supplies no contact/force/touch/depth truth, annotated subtask boundaries, point names, visibility/confidence or MANO mesh provenance. `betas=0` does not identify its cause. Numeric encoding precision is not capture precision. Small PTS differences, fast motion, dark pixels or zero outside counts do not prove drops, mislabels, drift, alignment or contact. Needed follow-up evidence can be described without inventing conclusions. Balanced diagnostic samples do not estimate population proportions.
+
+Development/browser regression and historical performance commands are in `docs/DEVELOPMENT.md`; those implementation details are not prerequisites for this analysis workflow. Historical recordings retain their dates/hashes and are not a replacement for a new independent Agent run.
+
+## Adding an MCP tool
+
+Use this workflow when asked to implement a new tool. It should let you complete the requested change from the repository and this guide without relying on an earlier conversation. The seven existing tools are the current baseline, not a maximum tool count. Preserve their contracts while adding the requested capability.
+
+### Locate the implementation
+
+| File                                                         | Responsibility when extending a tool                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| `app/tools.py`                                               | `tool_definitions()` publishes names, descriptions and input schemas; `call_tool()` validates and dispatches calls. Add the definition and its implementation here. |
+| `app/data/adapter.py`, `app/data/source.py`                  | Existing field catalog, episode tables and read-only local/S3 access. Reuse the adapter passed into `call_tool`; keep source access and caching in this layer. |
+| `app/viewstate.py`                                           | Canonical state validation, URL encoding/decoding and evidence validation. |
+| `app/config.py`, `app/data/errors.py`                        | Configured work/output limits and existing error types.      |
+| `app/main.py`, `app/render_service.py`                       | MCP transport, response packaging and shared render resource accounting. Ordinary JSON tools use the existing transport. |
+| `tests/test_tools.py`, `tests/test_mcp_http.py`, `tests/test_viewstate.py` | Dispatcher/limit tests, HTTP discovery/call contracts, and evidence URL round trips. Use the small adapters in the tool tests for deterministic numerical expectations. |
+
+Read `README.md` for Python 3.12+, dependency installation and data-source setup. Run commands from the repository root. Set `DATA_ROOT` to an existing snapshot, or configure the documented S3 environment variables; no source credentials belong in code or examples. `python -m app` starts the service. Test fixtures can cover numerical behavior without downloading a dataset. Set `LEROBOT_TEST_DATA_ROOT` separately when running tests against an available real snapshot.
+
+### Implement the requested contract
+
+1. Define the tool's purpose, required/optional arguments, defaults, output fields and missing-data behavior. State raw component indices, units, frame/time range semantics and the amount of data inspected. Read the field semantics below before interpreting vectors. Keep the change focused on the requested capability; add UI or rendering behavior only when it is needed for that capability.
+2. Add a unique tool definition to `tool_definitions()` with a useful description and bounded `inputSchema`. Add the matching branch to `call_tool()` and return its result explicitly. The current dispatcher checks unknown/missing argument keys, but does not run a general JSON Schema validator. Validate types, numerical bounds and incompatible arguments in the implementation as well; use `integer()` for integer inputs so booleans are rejected.
+3. Reuse `_episode()`, `_selected_frames()` and `_values()` where their contracts match the new operation. Reject invalid/empty ranges where the operation requires samples, and bound computation before materializing values. Use the applicable `Settings` row/scalar/computation limits; a small output does not justify an unlimited scan. Keep local and S3 data read-only and avoid arbitrary code/query execution supplied by a caller.
+4. Build JSON results with explicit input scope and counts. Paginated results need `truncated`, a usable `next_cursor`, and documented continuation semantics; exact summaries need an explicit completeness/exactness statement. Check the complete UTF-8 result, including timestamps, evidence and URLs, with `json_bytes()`/`_bounded()` and the applicable scalar limits. Do not return NaN/Infinity or silently report a partial calculation as exact. Raise existing bounded, actionable errors such as `DataNotFound` or `QueryLimitError`; keep sensitive source details out of messages.
+5. Return a matching `view_url` for data results. Reuse `_view_for()`/`_view_url()` or `normalize_view(..., **validation_context(adapter, settings))` followed by URL encoding. The link must retain the relevant episode, field/component and actual evidence window. Existing evidence kinds are `series_query` and `aggregate_series`; reuse them only when their meaning fits. For a new evidence contract, update validation, curve-window resolution and round-trip tests together. Do not relabel a new computation as an existing aggregate merely to satisfy validation, or imply that a representative frame proves a full-range conclusion.
+6. For an image-producing tool, reuse the injected tracked renderer and shared PNG path. Inspect `app/main.py`: render admission and MCP image packaging currently special-case the name `render_view`. Extend those decisions for the new image tool so it receives the same resource/PNG limits and emits one MCP image block plus bounded metadata, without duplicating base64 in text. A numeric tool does not require a new renderer or HTTP route.
+
+### Verify and hand off
+
+- Add a small fixture with independently known results. Cover the successful calculation, relevant invalid inputs, empty/no-match behavior, and output/work limits. For pagination, verify continuation has no gaps or duplicates. Decode the returned URL and assert the intended component and range; when rendering is involved, check the manifest and shared PNG contract as well.
+
+- Verify both `tools/list` discovery and `tools/call` execution through `/mcp`, including one invalid request. A Python dispatcher test alone does not establish transport integration. Existing exact tool-list assertions in `tests/test_tools.py` and `tests/test_mcp_http.py` must include the new tool while retaining checks for every baseline tool. MCP errors can arrive inside an HTTP 200 JSON-RPC response; inspect `error`/`result`, not just the HTTP status.
+
+- Run the focused tests and security check first:
+
+  `python -m pytest tests/test_tools.py tests/test_mcp_http.py tests/test_viewstate.py -qpython scripts/security_scan.py`
+
+  Include any new test module in that command. Run affected data/renderer/browser tests if those paths changed. Before claiming full-project acceptance, follow the full-suite and explicit real-snapshot instructions under Browser regression below. Missing real data is a pending real-data check, not a pass; do not repeat unrelated performance benchmarks for a JSON-only tool change.
+
+- Update this guide's tool-selection list and the README tool list with the actual new contract. Record the request, changed files, executed commands, results and remaining limitations in `tool-iterations.md`. Preserve any actual extension session under a new name in `agent-sessions/`; do not overwrite historical sessions or turn a proposed test into a recorded success.
+
+A tool extension is complete when a fresh client discovers it, valid calls return the expected bounded result and verifiable URL, invalid calls fail predictably, and existing tools retain their behavior. Documenting this workflow alone does not prove that a coding agent has independently completed an extension; that requires an actual request, code change and execution record.

@@ -1,0 +1,17 @@
+.runtime/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.env
+*.log
+lerobot-visualizer-cache/
+/data/
+/dataset/
+*.parquet
+*.mp4
+*.mov
+*.avi
+/test-results/
+
