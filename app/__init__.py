@@ -1,0 +1,2 @@
+"""LeRobot Visualizer application package."""
+
